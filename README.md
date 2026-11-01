@@ -15,6 +15,44 @@ Run parallel AI agents in OpenCode. Each agent gets its own session, context win
 
 Built on the public OpenCode SDKs — no OpenCode internals. Runtime dependencies are the three OpenCode SDK packages (`@opencode-ai/sdk`, `@opencode-ai/plugin`, `@opencode/plugin`). The bundled TUI companion additionally uses SolidJS and OpenTUI, provided by the OpenCode host and declared as peer dependencies.
 
+## Isolated Native V2 Profile
+
+This working copy adds directory-native `server.ts`, `tui.tsx`, and `rpc.ts`
+entrypoints for the pinned sibling OpenCode working profile. Existing V1
+exports remain separate. Native setup requires an explicit private `dbPath`;
+there is no fallback to the user's Ensemble database. Set `dashboardPort: 0`
+to keep the dashboard disabled.
+
+Native startup only rehydrates registry entries for the current canonical
+project. It does not wake idle or stale members or retry provider work.
+Summary, team context, and recovery stay project-scoped even when two
+projects share the same private database.
+
+Writable spawn starts with edit and shell denied. It creates the worktree
+from the lead's actual Location, confirms its branch, and waits for public
+Session movement to commit with an empty inbox and no active execution before
+granting permissions or admitting the first prompt. Failed Git operations,
+placement deadlines, and cancellation never fall back to shared writable
+access. Worktree resources left after a failure are retained for inspection.
+Read-only members, including members without worktrees, remain read-only.
+
+Native prompt delivery awaits durable admission, not model completion. Tool
+cancellation cancels only that operation's undelivered inputs. A cancelled
+spawn also interrupts its created child and revokes permissions; cancelling
+a message does not interrupt an existing recipient. Terminal failure and
+interruption do not send success reminders. Disposal awaits owned operations,
+stops observations, and closes SQLite even when cleanup reports errors.
+Cleanup failures retain the original operation error as `AggregateError.cause`.
+
+These Location and permission checks are not an OS sandbox. An allowed shell
+still runs with the user's operating-system privileges. This copy does not
+migrate real teams or replace an installed daily-driver plugin.
+
+Verification uses `bun typecheck`, `bun test test/`, and `bun run build`.
+The strict typecheck generates fresh public declarations from the pinned host
+and audits that raw host implementation sources do not cross the consumer
+boundary; runtime aliases continue to use the actual host packages.
+
 ## Quick Start
 
 Install the plugin and you're done:

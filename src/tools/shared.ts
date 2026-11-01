@@ -3,28 +3,29 @@ import { findTeamBySession } from "../types"
 import { runCommand } from "../process"
 
 /** Function type for dirty worktree check — injectable for testing. */
-export type IsDirtyFn = (dir: string) => Promise<boolean>
+export type IsDirtyFn = (dir: string, signal?: AbortSignal) => Promise<boolean>
 
 /** Function type for counting commits on a branch — injectable for testing. */
-export type CommitCountFn = (branch: string, cwd: string) => Promise<number>
+export type CommitCountFn = (branch: string, cwd: string, signal?: AbortSignal) => Promise<number>
 
 /** Count commits a branch has ahead of HEAD. Approximate — may include base divergence. Returns -1 if check fails. */
-export async function countBranchCommits(branch: string, cwd: string): Promise<number> {
+export async function countBranchCommits(branch: string, cwd: string, signal?: AbortSignal): Promise<number> {
   try {
-    const result = await runCommand(["git", "rev-list", "--count", `HEAD..${branch}`], { cwd })
+    const result = await runCommand(["git", "rev-list", "--count", `HEAD..${branch}`], { cwd, signal })
     if (result.exitCode !== 0) return -1
     const n = Number.parseInt(result.stdout.trim(), 10)
     return Number.isNaN(n) ? -1 : n
-  } catch { return -1 }
+  } catch (error) { if (signal?.aborted) throw error; return -1 }
 }
 
 /** Check if a worktree directory has uncommitted changes via git status. */
-export async function checkWorktreeDirty(dir: string): Promise<boolean> {
+export async function checkWorktreeDirty(dir: string, signal?: AbortSignal): Promise<boolean> {
   try {
-    const result = await runCommand(["git", "-C", dir, "status", "--porcelain"])
+    const result = await runCommand(["git", "-C", dir, "status", "--porcelain"], { signal })
     if (result.exitCode !== 0) return false // git failed — assume clean
     return result.stdout.trim().length > 0
-  } catch {
+  } catch (error) {
+    if (signal?.aborted) throw error
     return false // can't check — assume clean
   }
 }

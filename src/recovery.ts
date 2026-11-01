@@ -262,13 +262,14 @@ export async function recoverUndeliveredMessages(
  *
  * Returns the number of members rehydrated.
  */
-export function rehydrateRegistry(db: Database, registry: MemberRegistry): number {
+export function rehydrateRegistry(db: Database, registry: MemberRegistry, project?: string): number {
   const members = db.query(
     `SELECT tm.team_id, tm.name, tm.session_id
      FROM team_member tm
      JOIN team t ON tm.team_id = t.id
-     WHERE t.status = 'active' AND tm.status NOT IN ('shutdown', 'error')`
-  ).all() as Array<{ team_id: string; name: string; session_id: string }>
+      WHERE t.status = 'active' AND tm.status NOT IN ('shutdown', 'error')
+      AND (? IS NULL OR t.project_id = ?)`
+  ).all(project ?? null, project ?? null) as Array<{ team_id: string; name: string; session_id: string }>
   for (const m of members) {
     registry.register(m.team_id, m.name, m.session_id)
   }

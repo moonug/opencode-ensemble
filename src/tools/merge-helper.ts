@@ -9,16 +9,16 @@ export interface MergeResult {
 }
 
 /** Injectable function for testing. */
-export type MergeBranchFn = (branch: string, cwd: string) => Promise<MergeResult>
+export type MergeBranchFn = (branch: string, cwd: string, signal?: AbortSignal) => Promise<MergeResult>
 
 /** Injectable function for overlap detection before merge. */
-export type OverlapCheckFn = (branch: string, cwd: string) => Promise<string[]>
+export type OverlapCheckFn = (branch: string, cwd: string, signal?: AbortSignal) => Promise<string[]>
 
 /** Injectable function for preserving a branch before worktree deletion. */
-export type PreserveBranchFn = (sourceBranch: string, targetBranch: string, cwd: string) => Promise<boolean>
+export type PreserveBranchFn = (sourceBranch: string, targetBranch: string, cwd: string, signal?: AbortSignal) => Promise<boolean>
 
 /** Injectable function for deleting a branch. */
-export type DeleteBranchFn = (branch: string, cwd: string) => Promise<boolean>
+export type DeleteBranchFn = (branch: string, cwd: string, signal?: AbortSignal) => Promise<boolean>
 
 /** Human-readable resource identity for a team. */
 export interface TeamResourceParts {
@@ -68,8 +68,8 @@ export function teamWorktreeName(projectName: string, teamName: string, teamId: 
  * before session.abort() which may delete the worktree and its branch.
  * Returns true if the branch was successfully copied.
  */
-export async function preserveBranch(sourceBranch: string, targetBranch: string, cwd: string): Promise<boolean> {
-  const result = await runCommand(["git", "branch", targetBranch, sourceBranch], { cwd })
+export async function preserveBranch(sourceBranch: string, targetBranch: string, cwd: string, signal?: AbortSignal): Promise<boolean> {
+  const result = await runCommand(["git", "branch", targetBranch, sourceBranch], { cwd, signal })
   if (result.exitCode !== 0) {
     log(`merge-helper:preserve:failed src=${sourceBranch} target=${targetBranch} err=${result.stderr.trim()}`)
     return false
@@ -80,8 +80,8 @@ export async function preserveBranch(sourceBranch: string, targetBranch: string,
 /**
  * Delete a git branch. Returns true if successful.
  */
-export async function deleteBranch(branch: string, cwd: string): Promise<boolean> {
-  const result = await runCommand(["git", "branch", "-D", branch], { cwd })
+export async function deleteBranch(branch: string, cwd: string, signal?: AbortSignal): Promise<boolean> {
+  const result = await runCommand(["git", "branch", "-D", branch], { cwd, signal })
   if (result.exitCode !== 0) {
     log(`merge-helper:delete:failed branch=${branch}`)
     return false
@@ -93,13 +93,13 @@ export async function deleteBranch(branch: string, cwd: string): Promise<boolean
  * Raw squash merge of a single branch. No stash/pop — caller handles that.
  * Used by mergeBranch (single) and mergeMultipleBranches (batch).
  */
-export async function mergeBranchRaw(branch: string, cwd: string): Promise<MergeResult> {
-  const result = await runCommand(["git", "merge", "--squash", branch], { cwd })
+export async function mergeBranchRaw(branch: string, cwd: string, signal?: AbortSignal): Promise<MergeResult> {
+  const result = await runCommand(["git", "merge", "--squash", branch], { cwd, signal })
 
   if (result.exitCode !== 0) {
     const stderr = result.stderr.trim()
     log(`merge-helper:merge:conflict branch=${branch} err=${stderr}`)
-    await runCommand(["git", "merge", "--abort"], { cwd })
+    await runCommand(["git", "merge", "--abort"], { cwd, signal })
     return { ok: false, error: stderr || `merge exited with code ${result.exitCode}` }
   }
 
@@ -107,8 +107,8 @@ export async function mergeBranchRaw(branch: string, cwd: string): Promise<Merge
 }
 
 /** Unstage all changes so merge results appear as unstaged. */
-export async function gitReset(cwd: string): Promise<void> {
-  await runCommand(["git", "reset", "HEAD"], { cwd })
+export async function gitReset(cwd: string, signal?: AbortSignal): Promise<void> {
+  await runCommand(["git", "reset", "HEAD"], { cwd, signal })
 }
 
 /**
@@ -116,10 +116,10 @@ export async function gitReset(cwd: string): Promise<void> {
  * No stashing — existing unstaged changes from previous merges are preserved.
  * If the merge conflicts, the lead resolves it with git.
  */
-export async function mergeBranch(branch: string, cwd: string): Promise<MergeResult> {
-  const result = await mergeBranchRaw(branch, cwd)
+export async function mergeBranch(branch: string, cwd: string, signal?: AbortSignal): Promise<MergeResult> {
+  const result = await mergeBranchRaw(branch, cwd, signal)
   if (!result.ok) return result
-  await gitReset(cwd)
+  await gitReset(cwd, signal)
   return { ok: true }
 }
 
@@ -127,9 +127,9 @@ export async function mergeBranch(branch: string, cwd: string): Promise<MergeRes
  * Detect files that both the lead (local changes) and the agent (branch) modified.
  * Returns the list of overlapping file paths, or empty if safe to merge.
  */
-export async function getOverlappingFiles(branch: string, cwd: string): Promise<string[]> {
+export async function getOverlappingFiles(branch: string, cwd: string, signal?: AbortSignal): Promise<string[]> {
   const run = async (args: string[]) => {
-    const result = await runCommand(["git", ...args], { cwd })
+    const result = await runCommand(["git", ...args], { cwd, signal })
     if (result.exitCode !== 0) throw new Error(`git ${args.join(" ")} failed with exit code ${result.exitCode}`)
     return result.stdout.split("\n").filter(Boolean)
   }

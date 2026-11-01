@@ -19,7 +19,7 @@ export async function executeTeamCreate(
   }
 
   // Check if team name already exists
-  const projectId = deps.directory
+  const projectId = deps.native?.project ?? deps.directory
   const existing = deps.db.query("SELECT id, lead_session_id FROM team WHERE name = ? AND project_id = ? AND status = 'active'")
     .get(args.name, projectId) as { id: string; lead_session_id: string } | undefined
   if (existing) {

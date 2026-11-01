@@ -34,11 +34,16 @@ export async function executeTeamMessage(
     if (teamInfo.role !== "lead") throw new Error("Only the lead can update a teammate's model.")
     const parsed = parseModelId(args.model)
     if (!parsed) throw new Error(`Invalid model "${args.model}" — expected "provider/model" format (e.g. "anthropic/claude-sonnet").`)
-    const member = deps.db.query("SELECT status FROM team_member WHERE team_id = ? AND name = ?")
-      .get(teamInfo.teamId, args.to) as { status: string } | null
+    const member = deps.db.query("SELECT status, session_id FROM team_member WHERE team_id = ? AND name = ?")
+      .get(teamInfo.teamId, args.to) as { status: string; session_id: string } | null
     if (!member) throw new Error(`Teammate "${args.to}" not found in team "${teamInfo.teamName}".`)
     if (member.status === "shutdown" || member.status === "error") {
       throw new Error(`Teammate "${args.to}" is shut down — spawn a new teammate instead of updating the model.`)
+    }
+    if (deps.native) {
+      deps.signal?.throwIfAborted()
+      await deps.client.session.switchModel?.({ sessionID: member.session_id, model: parsed })
+      deps.signal?.throwIfAborted()
     }
     deps.db.run(
       "UPDATE team_member SET model = ?, time_updated = ? WHERE team_id = ? AND name = ?",
@@ -122,11 +127,13 @@ export async function executeTeamMessage(
   // because session.idle events are scoped per-instance.
   if (isToLead) {
     log(`team_message:wake-lead from=${senderName} recipientSession=${recipientSessionId}`)
-    deps.client.session.promptAsync({
+    const delivery = deps.client.session.promptAsync({
       sessionID: recipientSessionId,
       parts: [{ type: "text", text: `[System: New team message from ${senderName}]` }],
       synthetic: true,
-    }).catch((err) => {
+    })
+    if (deps.native) await delivery
+    else delivery.catch((err) => {
       log(`team_message:wake-lead:failed from=${senderName} err=${err instanceof Error ? err.message : String(err)}`)
     })
     return `Message sent to ${args.to}.`
@@ -145,13 +152,15 @@ export async function executeTeamMessage(
   // Deliver on the recipient's configured model, if any (#26).
   const deliveryText = `[Team message from ${senderName}]: ${messageText}`
   const recipientModel = getMemberModel(deps.db, teamInfo.teamId, args.to)
-  deps.client.session.promptAsync({
+  const delivery = deps.client.session.promptAsync({
     sessionID: recipientSessionId,
     parts: [{ type: "text", text: deliveryText }],
     ...(recipientModel ? { model: recipientModel } : {}),
   }).then(() => {
     markDelivered(deps.db, msgId)
-  }).catch((err) => {
+  })
+  if (deps.native) await delivery
+  else delivery.catch((err) => {
     log(`team_message:deliver:failed to=${args.to} err=${err instanceof Error ? err.message : String(err)}`)
   })
 

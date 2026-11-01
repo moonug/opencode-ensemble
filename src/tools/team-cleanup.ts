@@ -3,13 +3,13 @@ import { requireLead, requireCanPurgeArchivedTeams, checkWorktreeDirty } from ".
 import type { IsDirtyFn } from "./shared"
 import { spawnFailures } from "./team-spawn"
 import { getTeamResourceParts, mergeBranch, deleteBranch, preserveBranch, preservedBranchName, getOverlappingFiles, teamResourceSegment } from "./merge-helper"
-import type { MergeBranchFn, DeleteBranchFn, PreserveBranchFn, OverlapCheckFn } from "./merge-helper"
+import type { MergeBranchFn, DeleteBranchFn, OverlapCheckFn } from "./merge-helper"
 import { log } from "../log"
 import { runCommand } from "../process"
 
 type PurgeApprovalFn = (preview: string) => Promise<void>
-type ListBranchesFn = (namespace: string, cwd: string) => Promise<string[]>
-type BranchExistsFn = (branch: string, cwd: string) => Promise<boolean>
+type ListBranchesFn = (namespace: string, cwd: string, signal?: AbortSignal) => Promise<string[]>
+type BranchExistsFn = (branch: string, cwd: string, signal?: AbortSignal) => Promise<boolean>
 
 interface PurgeTarget {
   id: string
@@ -38,27 +38,29 @@ interface PurgeMemberResource {
   worktree_branch: string | null
 }
 
-async function listPreservedBranches(teamName: string, cwd: string): Promise<string[]> {
+async function listPreservedBranches(teamName: string, cwd: string, signal?: AbortSignal): Promise<string[]> {
   try {
-    const result = await runCommand(["git", "branch", "--list", `ensemble/preserved/${teamName}/*`, "--format", "%(refname:short)"], { cwd })
+    const result = await runCommand(["git", "branch", "--list", `ensemble/preserved/${teamName}/*`, "--format", "%(refname:short)"], { cwd, signal })
     if (result.exitCode !== 0) throw new Error(result.stderr.trim() || `git branch exited with code ${result.exitCode}`)
     return result.stdout.split("\n").map(branch => branch.trim()).filter(Boolean)
   } catch (err) {
+    signal?.throwIfAborted()
     const message = err instanceof Error ? err.message : String(err)
     if (message.includes("not a git repository")) return []
     throw new Error(`Failed to list preserved branches for ${teamName}: ${err instanceof Error ? err.message : String(err)}`)
   }
 }
 
-async function branchExists(branch: string, cwd: string): Promise<boolean> {
+async function branchExists(branch: string, cwd: string, signal?: AbortSignal): Promise<boolean> {
   try {
-    const result = await runCommand(["git", "branch", "--list", branch, "--format", "%(refname:short)"], { cwd })
+    const result = await runCommand(["git", "branch", "--list", branch, "--format", "%(refname:short)"], { cwd, signal })
     if (result.exitCode !== 0) {
       if (result.stderr.includes("not a git repository")) return false
       throw new Error(result.stderr.trim() || `git branch exited with code ${result.exitCode}`)
     }
     return result.stdout.split("\n").map(item => item.trim()).includes(branch)
   } catch (err) {
+    signal?.throwIfAborted()
     const message = err instanceof Error ? err.message : String(err)
     if (message.includes("not a git repository")) return false
     throw new Error(`Failed to check stale Ensemble branch ${branch}: ${message}`)
@@ -77,14 +79,14 @@ function resolvePurgeTargets(deps: ToolDeps, purge: string[]): PurgeTarget[] {
 
   if (purge.includes("*")) {
     return deps.db.query("SELECT t.id, t.name, t.project_id, p.name as project_name, t.time_updated FROM team t JOIN project p ON t.project_id = p.id WHERE t.status = 'archived' AND t.project_id = ? ORDER BY t.time_updated DESC, t.name ASC")
-      .all(deps.directory) as PurgeTarget[]
+      .all(deps.native?.project ?? deps.directory) as PurgeTarget[]
   }
 
   const uniqueNames = [...new Set(purge)]
   const rows = uniqueNames.map(name => ({
     name,
     teams: deps.db.query("SELECT t.id, t.name, t.project_id, p.name as project_name, t.status, t.time_updated FROM team t JOIN project p ON t.project_id = p.id WHERE t.name = ? AND t.project_id = ? ORDER BY t.time_updated DESC")
-      .all(name, deps.directory) as Array<{ id: string; name: string; project_id: string; project_name: string; status: string; time_updated: number }>,
+      .all(name, deps.native?.project ?? deps.directory) as Array<{ id: string; name: string; project_id: string; project_name: string; status: string; time_updated: number }>,
   }))
 
   const missing = rows.filter(row => row.teams.length === 0).map(row => row.name)
@@ -99,6 +101,7 @@ function resolvePurgeTargets(deps: ToolDeps, purge: string[]): PurgeTarget[] {
 }
 
 function deleteArchivedTeams(deps: ToolDeps, targets: PurgeTarget[]): void {
+  deps.signal?.throwIfAborted()
   const transaction = deps.db.transaction((teams: PurgeTarget[]) => {
     teams.forEach(team => {
       const row = deps.db.query("SELECT status FROM team WHERE id = ?").get(team.id) as { status: string } | null
@@ -246,6 +249,7 @@ async function cleanupStalePurgeResources(deps: ToolDeps, targets: PurgeTarget[]
   const workspaceIds = await existingWorkspaceIds(deps, resources)
 
   for (const resource of resources) {
+    deps.signal?.throwIfAborted()
     if (resource.workspace_id) {
       if (workspaceIds.has(resource.workspace_id)) {
         try {
@@ -255,6 +259,7 @@ async function cleanupStalePurgeResources(deps: ToolDeps, targets: PurgeTarget[]
           throw new Error(`Failed to remove stale workspace for ${resource.team_name}/${resource.member_name}: ${message}`)
         }
       }
+      deps.signal?.throwIfAborted()
       deps.db.run("UPDATE team_member SET workspace_id = NULL WHERE team_id = ? AND name = ?", [resource.team_id, resource.member_name])
     }
 
@@ -262,7 +267,7 @@ async function cleanupStalePurgeResources(deps: ToolDeps, targets: PurgeTarget[]
       if (worktreeDirs.has(resource.worktree_dir)) {
         let dirty: boolean
         try {
-          dirty = await isDirty(resource.worktree_dir)
+          dirty = await isDirty(resource.worktree_dir, deps.signal)
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err)
           throw new Error(`Cannot purge archived teams: failed to check archived worktree for uncommitted changes at ${resource.worktree_dir}: ${message}`)
@@ -271,12 +276,14 @@ async function cleanupStalePurgeResources(deps: ToolDeps, targets: PurgeTarget[]
           throw new Error(`Cannot purge archived teams: ${resource.team_name}/${resource.member_name} has uncommitted changes in archived worktree ${resource.worktree_dir}.`)
         }
         try {
+          deps.signal?.throwIfAborted()
           await deps.client.worktree.remove({ worktreeRemoveInput: { directory: resource.worktree_dir } })
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err)
           throw new Error(`Failed to remove stale worktree for ${resource.team_name}/${resource.member_name}: ${message}`)
         }
       }
+      deps.signal?.throwIfAborted()
       deps.db.run("UPDATE team_member SET worktree_dir = NULL WHERE team_id = ? AND name = ?", [resource.team_id, resource.member_name])
     }
   }
@@ -287,10 +294,13 @@ async function deleteStaleEnsembleBranches(
   cwd: string,
   delBranch: DeleteBranchFn,
   exists: BranchExistsFn,
+  signal?: AbortSignal,
 ): Promise<void> {
   for (const branch of branches) {
-    if (!await exists(branch, cwd)) continue
-    const ok = await delBranch(branch, cwd)
+    signal?.throwIfAborted()
+    if (!await exists(branch, cwd, signal)) continue
+    signal?.throwIfAborted()
+    const ok = await delBranch(branch, cwd, signal)
     if (!ok) throw new Error(`Failed to delete stale Ensemble branch: ${branch}`)
   }
 }
@@ -312,13 +322,15 @@ async function collectPreservedBranches(
   targets: PurgeTarget[],
   cwd: string,
   listBranches: ListBranchesFn,
+  signal?: AbortSignal,
 ): Promise<Map<string, string[]>> {
   const entries: Array<[string, string[]]> = await Promise.all(targets.map(async target => {
     const prefixes = [`ensemble/preserved/${target.project_name}/${teamResourceSegment(target.name, target.id)}/`, `ensemble/preserved/${target.name}/`]
     let listed: string[]
     try {
-      listed = [...await listBranches(target.project_name, cwd), ...await listBranches(target.name, cwd)]
+      listed = [...await listBranches(target.project_name, cwd, signal), ...await listBranches(target.name, cwd, signal)]
     } catch (err) {
+      signal?.throwIfAborted()
       const message = err instanceof Error ? err.message : String(err)
       if (message.includes("not a git repository")) listed = []
       else throw new Error(`Failed to list preserved branches for ${target.id}: ${message}`)
@@ -333,10 +345,12 @@ async function deletePreservedBranches(
   branchesByTeam: Map<string, string[]>,
   cwd: string,
   delBranch: DeleteBranchFn,
+  signal?: AbortSignal,
 ): Promise<void> {
   const branches = [...branchesByTeam.values()].flat()
   for (const branch of branches) {
-    const ok = await delBranch(branch, cwd)
+    signal?.throwIfAborted()
+    const ok = await delBranch(branch, cwd, signal)
     if (!ok) throw new Error(`Failed to delete preserved branch: ${branch}`)
   }
 }
@@ -416,6 +430,7 @@ export async function executeTeamCleanup(
   _listBranches?: ListBranchesFn,
   _branchExists?: BranchExistsFn,
 ): Promise<string> {
+  deps.signal?.throwIfAborted()
   if (args.purge && args.purge.length > 0) {
     requireCanPurgeArchivedTeams(deps, sessionId)
     const targets = resolvePurgeTargets(deps, args.purge)
@@ -423,7 +438,8 @@ export async function executeTeamCleanup(
 
     validatePurgeTargetsStillArchived(deps, targets)
     validatePurgeResources(deps, targets)
-    const branchesByTeam = await collectPreservedBranches(targets, deps.directory, _listBranches ?? listPreservedBranches)
+    const branchesByTeam = await collectPreservedBranches(targets, deps.directory, _listBranches ?? listPreservedBranches, deps.signal)
+    deps.signal?.throwIfAborted()
     const preview = buildPurgePreview(deps, targets, branchesByTeam)
     if (!args.confirm_purge) {
       const confirmToken = deps.purgeApprovals.create(sessionId, targets.map(target => target.id))
@@ -440,9 +456,9 @@ export async function executeTeamCleanup(
     await cleanupStalePurgeResources(deps, targets, isDirty)
 
     validatePurgeResources(deps, targets)
-    await deleteStaleEnsembleBranches(collectStaleEnsembleBranches(deps, targets), deps.directory, delBranch, _branchExists ?? branchExists)
-    const finalBranchesByTeam = await collectPreservedBranches(targets, deps.directory, _listBranches ?? listPreservedBranches)
-    await deletePreservedBranches(finalBranchesByTeam, deps.directory, delBranch)
+    await deleteStaleEnsembleBranches(collectStaleEnsembleBranches(deps, targets), deps.directory, delBranch, _branchExists ?? branchExists, deps.signal)
+    const finalBranchesByTeam = await collectPreservedBranches(targets, deps.directory, _listBranches ?? listPreservedBranches, deps.signal)
+    await deletePreservedBranches(finalBranchesByTeam, deps.directory, delBranch, deps.signal)
 
     deleteArchivedTeams(deps, targets)
 
@@ -455,7 +471,8 @@ export async function executeTeamCleanup(
   const members = deps.db.query("SELECT name, session_id, status, worktree_dir, worktree_branch, workspace_id FROM team_member WHERE team_id = ?")
     .all(teamInfo.teamId) as Array<{ name: string; session_id: string; status: string; worktree_dir: string | null; worktree_branch: string | null; workspace_id: string | null }>
 
-  const active = members.filter(m => m.status !== "shutdown" && m.status !== "shutdown_requested" && m.status !== "error")
+  deps.signal?.throwIfAborted()
+  const active = members.filter(m => m.status !== "shutdown" && (deps.native || m.status !== "shutdown_requested") && m.status !== "error")
 
   if (active.length > 0 && !args.force) {
     const names = active.map(m => m.name).join(", ")
@@ -468,10 +485,11 @@ export async function executeTeamCleanup(
     for (const member of members) {
       if (member.worktree_dir) {
         try {
-          if (await isDirty(member.worktree_dir)) {
+          if (await isDirty(member.worktree_dir, deps.signal)) {
             dirty.push({ name: member.name, branch: member.worktree_branch ?? "unknown" })
           }
-        } catch {
+        } catch (error) {
+          if (deps.native) throw error
           log(`cleanup:dirty-check:failed name=${member.name}`)
         }
       }
@@ -485,11 +503,13 @@ export async function executeTeamCleanup(
   // Force-abort active members — preserve branches BEFORE aborting
   if (args.force) {
     for (const member of active) {
+      if (deps.native) deps.db.run("UPDATE team_member SET status = 'shutdown_requested', time_updated = ? WHERE team_id = ? AND name = ?", [Date.now(), teamInfo.teamId, member.name])
       // Preserve branch before abort — session.abort() may destroy the worktree + branch
       if (member.worktree_branch && !member.worktree_branch.startsWith("ensemble/preserved/")) {
         const resource = getTeamResourceParts(deps.db, teamInfo.teamId)
         const safeBranch = preservedBranchName(resource.projectName, resource.teamName, resource.teamId, member.name)
-        const ok = await preserveBranch(member.worktree_branch, safeBranch, deps.directory)
+        const ok = await preserveBranch(member.worktree_branch, safeBranch, deps.directory, deps.signal)
+        if (!ok && deps.native) throw new Error(`Cannot preserve ${member.worktree_branch}; team remains active`)
         if (ok) {
           deps.db.run("UPDATE team_member SET worktree_branch = ? WHERE team_id = ? AND name = ?",
             [safeBranch, teamInfo.teamId, member.name])
@@ -498,7 +518,7 @@ export async function executeTeamCleanup(
       }
       try {
         await deps.client.session.abort({ sessionID: member.session_id })
-      } catch { /* best effort */ }
+      } catch (error) { if (deps.native) throw error }
     }
   }
 
@@ -513,14 +533,16 @@ export async function executeTeamCleanup(
       const branch = member.worktree_branch!
       // Warn (but don't block) if lead has local changes to overlapping files
       try {
-        const overlap = await overlapCheck(branch, deps.directory)
+        const overlap = await overlapCheck(branch, deps.directory, deps.signal)
         if (overlap.length > 0) {
           overlapWarnings.push(`${member.name}: ${overlap.join(", ")}`)
         }
-      } catch { /* best effort */ }
-      const result = await merge(branch, deps.directory)
+      } catch (error) { if (deps.native) throw error }
+      const result = await merge(branch, deps.directory, deps.signal)
       if (result.ok) {
-        await delBranch(branch, deps.directory)
+        deps.signal?.throwIfAborted()
+        await delBranch(branch, deps.directory, deps.signal)
+        deps.signal?.throwIfAborted()
         deps.db.run("UPDATE team_member SET worktree_branch = NULL WHERE team_id = ? AND name = ?", [teamInfo.teamId, member.name])
         merged.push(`${member.name} (${branch})`)
       } else {
@@ -532,21 +554,26 @@ export async function executeTeamCleanup(
 
   // Remove workspaces and worktrees
   for (const member of members) {
+    deps.signal?.throwIfAborted()
     if (member.workspace_id) {
       try {
         await deps.client.workspace.remove({ id: member.workspace_id })
+        deps.signal?.throwIfAborted()
         deps.db.run("UPDATE team_member SET workspace_id = NULL WHERE team_id = ? AND name = ?", [teamInfo.teamId, member.name])
       } catch { /* best effort */ }
     }
     if (member.worktree_dir) {
+      deps.signal?.throwIfAborted()
       try {
         await deps.client.worktree.remove({ worktreeRemoveInput: { directory: member.worktree_dir } })
+        deps.signal?.throwIfAborted()
         deps.db.run("UPDATE team_member SET worktree_dir = NULL WHERE team_id = ? AND name = ?", [teamInfo.teamId, member.name])
       } catch { /* best effort */ }
     }
   }
 
   // Archive team
+  deps.signal?.throwIfAborted()
   deps.db.run("UPDATE team SET status = 'archived', time_updated = ? WHERE id = ?", [Date.now(), teamInfo.teamId])
 
   // Clean up in-memory state

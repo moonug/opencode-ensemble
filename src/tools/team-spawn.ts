@@ -3,7 +3,6 @@ import { validateMemberName } from "../util"
 import { requireLead } from "./shared"
 import { claimTask } from "./team-claim"
 import { notifyLead } from "../notify"
-import { releaseMemberTasks } from "../tasks"
 import { parseModelId } from "../member-model"
 import { log } from "../log"
 import type { EnsembleConfig } from "../config"
@@ -90,9 +89,10 @@ export async function executeTeamSpawn(
   // Prefer the agent's own permission rules (V2) so any agent that denies
   // edits — not only the built-in plan/explore — is treated as read-only and
   // never gets a worktree or a shell allow. Fall back to the built-in names.
-  const isReadOnly = (await deps.client.agent?.readOnly(agent).catch(() => undefined))
+  const isReadOnly = (await deps.client.agent?.readOnly(agent).catch((error) => { if (deps.native) throw error; return undefined }))
     ?? (agent === "plan" || agent === "explore")
-  const useWorktree = args.worktree !== false && !isReadOnly && !isWorktreeDirectory(deps.directory)
+  const useWorktree = args.worktree !== false && !isReadOnly && (deps.native || !isWorktreeDirectory(deps.directory))
+  deps.signal?.throwIfAborted()
   const usePlanApproval = args.plan_approval === true
 
   log(`spawn:start name=${args.name} agent=${agent} worktree=${useWorktree}`)
@@ -106,16 +106,16 @@ export async function executeTeamSpawn(
     const worktreeName = teamWorktreeName(resource.projectName, resource.teamName, resource.teamId, args.name)
     try {
       log(`spawn:worktree:start name=${args.name}`)
-      const result = await withTimeout(
-        deps.client.worktree.create({ worktreeCreateInput: { name: worktreeName } }),
-        getSpawnTimeout(), `worktree.create for "${args.name}"`
-      )
+      const pending = deps.client.worktree.create({ worktreeCreateInput: { name: worktreeName } })
+      const result = deps.native ? await pending : await withTimeout(pending, getSpawnTimeout(), `worktree.create for "${args.name}"`)
       if (result.data) {
         worktreeDir = result.data.directory
         worktreeBranch = result.data.branch
       }
       log(`spawn:worktree:done name=${args.name} dir=${worktreeDir}`)
+      if (deps.native && (!worktreeDir || !worktreeBranch)) throw new Error("Worktree creation did not confirm an isolated directory and branch")
     } catch (err) {
+      if (deps.native) throw err
       log(`spawn:worktree:failed name=${args.name} err=${err instanceof Error ? err.message : String(err)}`)
       try {
         await deps.client.tui.showToast({
@@ -131,7 +131,7 @@ export async function executeTeamSpawn(
   // Create workspace from worktree branch — links session to worktree directory.
   // OQ-workspace: assumes workspace.create({ branch }) auto-links to the worktree at that branch.
   let workspaceId: string | null = null
-  if (worktreeDir && worktreeBranch) {
+  if (worktreeDir && worktreeBranch && !deps.native) {
     try {
       log(`spawn:workspace:start name=${args.name}`)
       const wsResult = await withTimeout(
@@ -183,7 +183,7 @@ export async function executeTeamSpawn(
     }
   }
 
-  if (isReadOnly) {
+  if (isReadOnly || (deps.native && !useWorktree)) {
     permission.push(
       { permission: "edit", pattern: "*", action: "deny" },
       { permission: "bash", pattern: "*", action: "deny" },
@@ -199,14 +199,15 @@ export async function executeTeamSpawn(
   // team tool. Safe: nested calls inside execute still enforce their own
   // permissions, so explore stays read-only.
   permission.push({ permission: "execute", pattern: "*", action: "allow" })
+  if (deps.native) permission.push({ permission: "external_directory", pattern: "*", action: "deny" })
+  deps.signal?.throwIfAborted()
 
   // Create child session — bind to workspace if available (server-enforced CWD isolation).
   // Falls back to no workspace binding if workspace.create failed.
   let childSessionId: string | undefined
   try {
     log(`spawn:session:start name=${args.name}`)
-    const createResult = await withTimeout(
-      deps.client.session.create({
+    const creating = deps.client.session.create({
         parentID: sessionId,
         title: `${args.name} (@${agent} teammate)`,
         permission,
@@ -218,9 +219,9 @@ export async function executeTeamSpawn(
           // evaluated relative to it, and the `edit * allow` rule below
           // would grant edits to the whole shared tree (PR #46 review).
           : worktreeDir ? { directory: worktreeDir } : {}),
-      }),
-      getSpawnTimeout(), `session.create for "${args.name}"`
-    )
+      })
+    const createResult = deps.native ? await creating : await withTimeout(creating, getSpawnTimeout(), `session.create for "${args.name}"`)
+    deps.signal?.throwIfAborted()
     childSessionId = createResult.data?.id
     log(`spawn:session:done name=${args.name} sessionId=${childSessionId}`)
   } catch (err) {
@@ -249,6 +250,7 @@ export async function executeTeamSpawn(
     throw new Error("Failed to create teammate session")
   }
 
+  deps.signal?.throwIfAborted()
   // Register in DB
   const planApproval = usePlanApproval ? "pending" : "none"
   const now = Date.now()
@@ -420,12 +422,15 @@ export async function executeTeamSpawn(
 
   // Fire-and-forget: send prompt to teammate session.
   log(`spawn:promptAsync:fire name=${args.name} sessionId=${childSessionId}`)
-  deps.client.session.promptAsync({
+  deps.signal?.throwIfAborted()
+  const delivery = deps.client.session.promptAsync({
     sessionID: childSessionId,
     parts: [{ type: "text", text: contextStr }],
     agent,
     ...(modelParam ? { model: modelParam } : {}),
-  }).catch((err) => {
+  })
+  if (deps.native) await delivery
+  else delivery.catch((err) => {
     const errMsg = err instanceof Error ? err.message : String(err)
     log(`spawn:promptAsync:failed name=${args.name} err=${errMsg} — rolling back`)
     try {

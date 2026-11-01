@@ -26,6 +26,8 @@ export async function executeTeamShutdown(
     .get(teamInfo.teamId, args.member) as { session_id: string; status: string; worktree_branch: string | null; worktree_dir: string | null } | null
   if (!member) throw new Error(`Teammate "${args.member}" not found in team "${teamInfo.teamName}"`)
   if (member.status === "shutdown") throw new Error(`Teammate "${args.member}" is already shut down`)
+  deps.signal?.throwIfAborted()
+  if (deps.native) deps.db.run("UPDATE team_member SET status = 'shutdown_requested', time_updated = ? WHERE team_id = ? AND name = ?", [Date.now(), teamInfo.teamId, args.member])
 
   const force = args.force ?? false
 
@@ -42,7 +44,8 @@ export async function executeTeamShutdown(
     const statuses = await deps.client.session.status()
     const sessionStatus = statuses.data?.[member.session_id]
     isIdle = !sessionStatus || sessionStatus.type === "idle"
-  } catch {
+  } catch (error) {
+    if (deps.native) throw error
     // Status poll failed — assume busy, fall through to graceful path
   }
 
@@ -58,7 +61,7 @@ export async function executeTeamShutdown(
   if (member.worktree_branch) {
     const resource = getTeamResourceParts(deps.db, teamInfo.teamId)
     const safeBranch = preservedBranchName(resource.projectName, resource.teamName, resource.teamId, args.member)
-    const ok = await preserve(member.worktree_branch, safeBranch, deps.directory)
+    const ok = await preserve(member.worktree_branch, safeBranch, deps.directory, deps.signal)
     if (ok) {
       deps.db.run(
         "UPDATE team_member SET worktree_branch = ? WHERE team_id = ? AND name = ?",
@@ -69,14 +72,17 @@ export async function executeTeamShutdown(
   }
 
   try {
-    deps.client.session.promptAsync({
+    const delivery = deps.client.session.promptAsync({
       sessionID: member.session_id,
       parts: [{
         type: "text",
         text: `[Shutdown requested]: The lead has requested you shut down. Finish your current task, send your final findings to the lead via team_message, then stop.`,
       }],
-    }).catch(() => { /* fire-and-forget */ })
-  } catch {
+    })
+    if (deps.native) await delivery
+    else delivery.catch(() => { /* fire-and-forget */ })
+  } catch (error) {
+    if (deps.native) throw error
     // promptAsync failed — best effort
   }
 
@@ -105,7 +111,7 @@ async function preserveAndAbort(
   if (worktreeBranch && !worktreeBranch.startsWith("ensemble/preserved/")) {
     const resource = getTeamResourceParts(deps.db, teamId)
     const safeBranch = preservedBranchName(resource.projectName, resource.teamName, resource.teamId, memberName)
-    const ok = await preserve(worktreeBranch, safeBranch, deps.directory)
+    const ok = await preserve(worktreeBranch, safeBranch, deps.directory, deps.signal)
     if (ok) {
       deps.db.run(
         "UPDATE team_member SET worktree_branch = ? WHERE team_id = ? AND name = ?",
@@ -113,20 +119,23 @@ async function preserveAndAbort(
       )
       log(`shutdown:branch:preserved src=${worktreeBranch} target=${safeBranch}`)
     } else {
+      if (deps.native) throw new Error(`Cannot preserve ${worktreeBranch}; teammate was not interrupted`)
       log(`shutdown:branch:preserve-failed src=${worktreeBranch} target=${safeBranch}`)
     }
   }
 
   // Now safe to abort — the branch is preserved
+  if (deps.native) deps.db.run("UPDATE team_member SET status = 'shutdown_requested', execution_status = 'cancel_requested', time_updated = ? WHERE team_id = ? AND name = ?", [Date.now(), teamId, memberName])
   try {
     await deps.client.session.abort({ sessionID: sessionId })
-  } catch {
+  } catch (error) {
+    if (deps.native) throw error
     // Abort failed — session may already be gone
   }
 
   deps.db.run(
-    "UPDATE team_member SET status = 'shutdown', execution_status = 'idle', time_updated = ? WHERE team_id = ? AND name = ?",
-    [Date.now(), teamId, memberName],
+    "UPDATE team_member SET status = 'shutdown', execution_status = ?, time_updated = ? WHERE team_id = ? AND name = ?",
+    [deps.native ? "cancelled" : "idle", Date.now(), teamId, memberName],
   )
 
   // Release any tasks this member was working — they are gone now, so their
@@ -151,9 +160,9 @@ async function getBranchStatus(
   const branch = row.worktree_branch
   const parts: string[] = []
 
-  const commits = await commitCount(branch, deps.directory)
+  const commits = await commitCount(branch, deps.directory, deps.signal)
   // Best-effort dirty check — worktree may already be deleted by session.abort() race
-  const dirty = worktreeDir ? await isDirty(worktreeDir).catch(() => false) : false
+  const dirty = worktreeDir ? await isDirty(worktreeDir, deps.signal).catch((error) => { if (deps.signal?.aborted) throw error; return false }) : false
 
   if (commits > 0 && dirty) {
     parts.push(`${memberName} committed ${commits} change${commits !== 1 ? "s" : ""} and has uncommitted work.`)

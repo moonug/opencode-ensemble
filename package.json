@@ -6,6 +6,7 @@
   "main": "dist/index.js",
   "exports": {
     ".": "./src/index.ts",
+    "./server": "./server.ts",
     "./rpc": "./src/rpc.ts",
     "./tui": "./src/tui.tsx"
   },
@@ -25,6 +26,9 @@
     "orchestration"
   ],
   "files": [
+    "server.ts",
+    "tui.tsx",
+    "rpc.ts",
     "dist",
     "src",
     "LICENSE",
@@ -33,7 +37,7 @@
   ],
   "scripts": {
     "lint": "bunx biome lint src/",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "bun typecheck.ts",
     "test": "bun test",
     "eval:smoke": "bun eval/smoke.ts",
     "build": "bun build src/index.ts --outdir dist --target node",
@@ -45,8 +49,8 @@
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.9",
-    "@opentui/core": "0.5.10",
-    "@opentui/solid": "0.5.10",
+    "@opentui/core": "0.5.17",
+    "@opentui/solid": "0.5.17",
     "@types/bun": "latest",
     "solid-js": "1.9.4"
   },
@@ -59,6 +63,7 @@
   "dependencies": {
     "@opencode-ai/plugin": "^1.17.18",
     "@opencode-ai/sdk": "^1.17.18",
-    "@opencode/plugin": "2.0.3"
+    "@opencode/plugin": "2.0.3",
+    "effect": "4.0.1"
   }
 }

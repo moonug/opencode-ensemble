@@ -53,7 +53,7 @@ export interface V2SetupContext {
 
 /** Extract answer text from a V2 tool result for approval matching. */
 export function extractQuestionOutput(result?: {
-  content?: string | Array<{ type?: string; text?: string }>
+  content?: string | ReadonlyArray<{ type?: string; text?: string }>
 }): string {
   const content = result?.content
   if (typeof content === "string") return content

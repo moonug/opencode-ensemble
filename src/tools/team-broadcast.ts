@@ -48,13 +48,15 @@ export async function executeTeamBroadcast(
       skipped++
       continue
     }
-    deps.client.session.promptAsync({
+    const delivery = deps.client.session.promptAsync({
       sessionID: recipient.sessionId,
       parts: [{ type: "text", text: `[Team broadcast from ${senderName}]: ${args.text}` }],
     }).then(() => {
       delivered++
       if (delivered === 1) markDelivered(deps.db, msgId)
-    }).catch((err) => {
+    })
+    if (deps.native) await delivery
+    else delivery.catch((err) => {
       log(`team_broadcast:deliver:failed to=${recipient.name} err=${err instanceof Error ? err.message : String(err)}`)
     })
   }

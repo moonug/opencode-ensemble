@@ -1,0 +1,19 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "paths": {
+      "@opencode/plugin": ["../opencode-v2-profile/.cache/v2-profile/evidence/checks/ensemble-native-types/plugin/src/promise/index.d.ts"],
+      "@opencode/plugin/tui": ["../opencode-v2-profile/.cache/v2-profile/evidence/checks/ensemble-native-types/plugin/src/tui/index.d.ts"],
+      "@opencode/plugin/*": ["../opencode-v2-profile/.cache/v2-profile/evidence/checks/ensemble-native-types/plugin/src/*.d.ts"],
+      "@opencode/ai": ["../opencode-v2-profile/.cache/v2-profile/evidence/checks/ensemble-native-types/ai/src/index.d.ts"],
+      "@opencode/ai/*": ["../opencode-v2-profile/.cache/v2-profile/evidence/checks/ensemble-native-types/ai/src/*.d.ts"],
+      "@opencode/schema/*": ["../opencode-v2-profile/.cache/v2-profile/evidence/checks/ensemble-native-types/schema/src/*.d.ts"],
+      "@opencode/schema": ["../opencode-v2-profile/.cache/v2-profile/evidence/checks/ensemble-native-types/schema/src/index.d.ts"],
+      "@opencode/client": ["../opencode-v2-profile/.cache/v2-profile/evidence/checks/ensemble-native-types/client/src/promise/index.d.ts"],
+      "@opencode/client/*": ["../opencode-v2-profile/.cache/v2-profile/evidence/checks/ensemble-native-types/client/src/*.d.ts"],
+      "@opencode/protocol/*": ["../opencode-v2-profile/.cache/v2-profile/evidence/checks/ensemble-native-types/protocol/src/*.d.ts"],
+      "@opencode/util/*": ["../opencode-v2-profile/.cache/v2-profile/evidence/checks/ensemble-native-types/util/src/*.d.ts"],
+      "@opencode/theme/*": ["../opencode-v2-profile/.cache/v2-profile/evidence/checks/ensemble-native-types/theme/src/*.d.ts", "../opencode-v2-profile/.cache/v2-profile/evidence/checks/ensemble-native-types/theme/src/*/index.d.ts"]
+    }
+  }
+}

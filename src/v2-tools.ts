@@ -19,7 +19,7 @@ export interface V2ToolDef {
   name: string
   description: string
   input: Record<string, unknown>
-  execute(input: unknown, context: { sessionID: string }): Promise<{ content: string }>
+  execute(input: unknown, context: { sessionID: string; signal?: AbortSignal }): Promise<{ content: string }>
 }
 
 /** Minimal structural subset of the V2 tool domain. */
@@ -67,15 +67,15 @@ export async function registerV2Tools(domain: V2ToolDomain, deps: ToolDeps): Pro
   const run = <A>(
     fn: (deps: ToolDeps, args: A, sessionID: string) => Promise<string>,
     track?: (sessionID: string, args: A) => void,
-  ) => async (input: unknown, context: { sessionID: string }) => {
+  ) => async (input: unknown, context: { sessionID: string; signal?: AbortSignal }) => {
     const args = input as A
     track?.(context.sessionID, args)
-    return { content: await fn(deps, args, context.sessionID) }
+    return { content: await (deps.native ? deps.native.run(context.signal, (scoped) => fn(scoped, args, context.sessionID)) : fn(deps, args, context.sessionID)) }
   }
   const runSession = (fn: (deps: ToolDeps, sessionID: string) => Promise<string>) => async (
     _input: unknown,
-    context: { sessionID: string },
-  ) => ({ content: await fn(deps, context.sessionID) })
+    context: { sessionID: string; signal?: AbortSignal },
+  ) => ({ content: await (deps.native ? deps.native.run(context.signal, (scoped) => fn(scoped, context.sessionID)) : fn(deps, context.sessionID)) })
 
   await domain.transform((editor) => {
     editor.add({
@@ -285,27 +285,13 @@ export async function registerV2Tools(domain: V2ToolDomain, deps: ToolDeps): Pro
         },
         additionalProperties: false,
       },
-      execute: async (input: unknown, context: { sessionID: string }) => {
-        const args = input as {
-          force?: boolean
-          acknowledge_uncommitted?: boolean
-          purge?: string[]
-          confirm_purge?: boolean
-          confirm_token?: string
-        }
-        const content = await executeTeamCleanup(
-          deps,
-          {
-            force: args.force ?? false,
-            acknowledge_uncommitted: args.acknowledge_uncommitted,
-            purge: args.purge,
-            confirm_purge: args.confirm_purge,
-            confirm_token: args.confirm_token,
-          },
-          context.sessionID,
-        )
-        return { content }
-      },
+      execute: run((scoped, args: {
+        force?: boolean
+        acknowledge_uncommitted?: boolean
+        purge?: string[]
+        confirm_purge?: boolean
+        confirm_token?: string
+      }, sessionID) => executeTeamCleanup(scoped, { ...args, force: args.force ?? false }, sessionID)),
     })
 
     editor.add({

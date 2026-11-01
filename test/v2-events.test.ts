@@ -66,6 +66,22 @@ describe("v2-events (issue #36, DRY: reuses hooks.ts)", () => {
     expect(tracker.isDescendantOf("ses_child", new Set(["ses_alice"]))).toBe(true)
   })
 
+  test.each([
+    ["session.execution.failed", undefined, "error", "failed"],
+    ["session.execution.interrupted", "user", "error", "cancelled"],
+    ["session.execution.interrupted", "shutdown", "shutdown", "cancelled"],
+  ])("%s records a terminal result without successful idle", (type, reason, status, execution) => {
+    const { db, registry, tracker } = seedTeam()
+    try {
+      const event = { type: type ?? "", data: { sessionID: "ses_alice", reason } }
+      expect(dispatchV2Event(db, registry, tracker, event)).toMatchObject({ to: status })
+      expect(db.query("SELECT status, execution_status FROM team_member WHERE name = 'alice'").get()).toMatchObject({ status, execution_status: execution })
+      expect(dispatchV2Event(db, registry, tracker, event)).toBeUndefined()
+    } finally {
+      db.close()
+    }
+  })
+
   test("session.retry.scheduled persists retry columns without changing status", () => {
     const { db, registry, tracker } = seedTeam()
     const transition = dispatchV2Event(db, registry, tracker, {

@@ -1,5 +1,27 @@
 # opencode-ensemble — Agent Guidelines
 
+## Isolated Native Working Profile
+
+The root `server.ts` entrypoint uses `src/native-setup.ts` and
+`src/native-client.ts` against the pinned sibling host. It does not enter V1
+startup recovery. Native setup requires a private explicit `dbPath`, scopes
+rehydration and RPC to the canonical project, and never performs startup
+wakes. Keep `dashboardPort: 0` in the artificial profile.
+
+The legacy fire-and-forget rules below apply to V1 transport. Native tools
+await durable prompt admission, propagate cancellation, and wait for committed
+public Session placement before granting edit/shell. Do not replace this with
+legacy workspaces or prompt-only CWD instructions. Native member observation
+uses each known Session's log; descendant tool isolation resolves missing
+parent links through public `session.get`, not a global event subscription.
+
+Run this copy's verification only through the profile evidence wrapper. Keep
+the original strict compiler flags: `bun typecheck` regenerates and audits the
+public declaration boundary before checking the consumer. Real-host acceptance
+lives in the sibling host's `packages/core/test/plugin/ensemble.test.ts` and
+uses artificial Git repositories, private SQLite, and the external TestLLM
+boundary. Do not access real teams, user state, providers, or installed commands.
+
 ## What This Is
 
 opencode-ensemble is an OpenCode plugin that enables agent teams: multiple

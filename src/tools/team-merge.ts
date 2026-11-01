@@ -19,6 +19,7 @@ export async function executeTeamMerge(
   commitCount: CommitCountFn = countBranchCommits,
   isDirty: IsDirtyFn = checkWorktreeDirty,
 ): Promise<string> {
+  deps.signal?.throwIfAborted()
   const teamInfo = requireLead(deps, sessionId)
 
   const member = deps.db.query("SELECT status, worktree_branch, worktree_dir FROM team_member WHERE team_id = ? AND name = ?")
@@ -45,9 +46,12 @@ export async function executeTeamMerge(
   // A commit-count check failure returns -1 (unknown) -- never treat that as "nothing to
   // merge"; fall through to the real merge attempt so a check failure can't silently skip
   // real work.
-  const commits = await commitCount(branch, deps.directory)
+  const commits = await commitCount(branch, deps.directory, deps.signal)
   if (commits === 0) {
-    const dirty = member.worktree_dir ? await isDirty(member.worktree_dir).catch(() => false) : false
+    const dirty = member.worktree_dir ? await isDirty(member.worktree_dir, deps.signal).catch(() => {
+      deps.signal?.throwIfAborted()
+      return false
+    }) : false
     if (dirty) {
       return [
         `Nothing to merge for "${args.member}" — their branch (${branch}) has no commits.`,
@@ -62,7 +66,7 @@ export async function executeTeamMerge(
 
   // Block merge if lead has local changes to files the agent also modified
   try {
-    const overlap = await overlapCheck(branch, deps.directory)
+    const overlap = await overlapCheck(branch, deps.directory, deps.signal)
     if (overlap.length > 0) {
       const files = overlap.map(f => `  - ${f}`).join("\n")
       return [
@@ -74,10 +78,12 @@ export async function executeTeamMerge(
       ].join("\n")
     }
   } catch {
+    deps.signal?.throwIfAborted()
     log(`merge:overlap-check:failed member=${args.member} branch=${branch}`)
   }
 
-  const result = await merge(branch, deps.directory)
+  deps.signal?.throwIfAborted()
+  const result = await merge(branch, deps.directory, deps.signal)
   if (!result.ok) {
     return [
       `Merge conflict merging ${args.member}'s branch (${branch}).`,
@@ -90,7 +96,9 @@ export async function executeTeamMerge(
   }
 
   // Merge succeeded — delete the preserved branch and clear DB
-  await delBranch(branch, deps.directory)
+  deps.signal?.throwIfAborted()
+  await delBranch(branch, deps.directory, deps.signal)
+  deps.signal?.throwIfAborted()
   deps.db.run(
     "UPDATE team_member SET worktree_branch = NULL WHERE team_id = ? AND name = ?",
     [teamInfo.teamId, args.member],

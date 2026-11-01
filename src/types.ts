@@ -20,6 +20,12 @@ export interface ToolDeps {
   config: Required<EnsembleConfig>
   /** Stall/activity tracker — shared with the Watchdog. */
   progressTracker: ProgressTracker
+  /** Native profile placement and cancellation boundary; absent on V1. */
+  native?: {
+    project: string
+    run<T>(signal: AbortSignal | undefined, task: (deps: ToolDeps) => Promise<T>): Promise<T>
+  }
+  signal?: AbortSignal
 }
 
 /** A single permission rule for session-level enforcement. */
@@ -40,6 +46,7 @@ export interface PluginClient {
     readOnly(agent: string): Promise<boolean | undefined>
   }
   session: {
+    switchModel?(options: { sessionID: string; model: { providerID: string; modelID: string } }): Promise<unknown>
     create(options: {
       parentID?: string
       title?: string
